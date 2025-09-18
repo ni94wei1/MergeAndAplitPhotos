@@ -1,6 +1,7 @@
 {
     "watermark_path": "",
-    "watermark_size": 50,
+    "watermark_size": 19,
     "watermark_pos": 3,
-    "watermark_opacity": 70
+    "watermark_opacity": 79,
+    "watermark_enabled": 1
 }

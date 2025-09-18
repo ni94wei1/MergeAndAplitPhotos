@@ -1,0 +1,23 @@
+{
+    "images": [
+        {
+            "path": "test_merge_dir\\test_image.jpg",
+            "exif": {
+                "Filename": "test_image.jpg",
+                "Width": 100,
+                "Height": 100
+            },
+            "position": [
+                0,
+                0
+            ]
+        }
+    ],
+    "merged_image": "merged_result.jpg",
+    "timestamp": "2023-01-01 12:00:00",
+    "merge_options": {
+        "layout": "grid",
+        "rows": 1,
+        "cols": 1
+    }
+}

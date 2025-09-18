@@ -5,6 +5,53 @@ from tkinter import filedialog, messagebox, ttk, Scale
 from PIL import Image, ImageEnhance
 from PIL.ExifTags import TAGS
 import piexif
+import os
+from fractions import Fraction
+
+# 定义常用的合并数量和对应的行列配置
+MERGE_OPTIONS = {
+    2: {"portrait": (2, 1), "landscape": (1, 2)},  # 竖屏2张: 2行1列, 横屏2张: 1行2列
+    3: {"portrait": (3, 1), "landscape": (3, 1)},  # 竖屏3张: 3行1列, 横屏3张: 3行1列
+    4: {"portrait": (2, 2), "landscape": (2, 2)},  # 竖屏4张: 2行2列, 横屏4张: 2行2列
+    6: {"portrait": (2, 3), "landscape": (3, 2)},  # 竖屏6张: 2行3列, 横屏6张: 3行2列
+    9: {"portrait": (3, 3), "landscape": (3, 3)}   # 竖屏9张: 3行3列, 横屏9张: 3行3列
+}
+
+# 默认最大尺寸限制为12000像素
+DEFAULT_MAX_SIZE = 12000
+
+# 定义保存的常量
+FILE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp')
+
+
+class PILJSONEncoder(json.JSONEncoder):
+    """自定义JSON编码器，用于处理PIL和EXIF相关的特殊类型"""
+    def default(self, obj):
+        # 处理IFDRational类型（piexif中的分数类型）
+        if hasattr(obj, 'numerator') and hasattr(obj, 'denominator'):
+            try:
+                # 转换为浮点数
+                return float(obj.numerator) / float(obj.denominator)
+            except (ZeroDivisionError, ValueError):
+                return 0.0
+        # 处理bytes类型
+        elif isinstance(obj, bytes):
+            try:
+                return obj.decode('utf-8', errors='replace')
+            except:
+                return str(obj)
+        # 处理Fraction类型
+        elif isinstance(obj, Fraction):
+            try:
+                return float(obj)
+            except (ZeroDivisionError, ValueError):
+                return 0.0
+        # 处理其他无法序列化的类型
+        else:
+            try:
+                return str(obj)
+            except:
+                return "无法序列化的对象"
 
 # 配置文件路径
 CONFIG_FILE = "watermark_config.json"
@@ -26,111 +73,210 @@ def load_watermark_config():
         "watermark_enabled": 1  # 1=开启, 0=关闭
     }
 
+
+def is_portrait(image):
+    """判断图片是否为竖屏
+    竖屏：高度 > 宽度
+    横屏：宽度 > 高度
+    正方形：宽度 == 高度，这里统一归为横屏处理
+    """
+    return image.height > image.width
+
+
+def categorize_images_by_orientation(src_dir):
+    """按横竖屏分类图片
+    返回：(portrait_images, landscape_images, portrait_exif, landscape_exif, portrait_filenames, landscape_filenames)
+    """
+    portrait_images = []
+    landscape_images = []
+    portrait_exif = []
+    landscape_exif = []
+    portrait_filenames = []
+    landscape_filenames = []
+    
+    for fname in sorted(os.listdir(src_dir)):
+        if fname.lower().endswith(FILE_EXTENSIONS):
+            try:
+                img_path = os.path.join(src_dir, fname)
+                img = Image.open(img_path)
+                
+                # 提取并保存EXIF元数据
+                exif_data = extract_exif_data(img_path)
+                
+                # 根据方向分类图片
+                if is_portrait(img):
+                    portrait_images.append(img)
+                    portrait_exif.append(exif_data)
+                    portrait_filenames.append(fname)
+                else:
+                    landscape_images.append(img)
+                    landscape_exif.append(exif_data)
+                    landscape_filenames.append(fname)
+            except Exception as e:
+                print(f"无法打开 {fname}: {e}")
+    
+    print(f"共找到 {len(portrait_images)} 张竖屏图片，{len(landscape_images)} 张横屏图片")
+    return portrait_images, landscape_images, portrait_exif, landscape_exif, portrait_filenames, landscape_filenames
+
+
+def extract_exif_data(image_path):
+    """提取图片的EXIF数据"""
+    exif_data = {}
+    try:
+        img = Image.open(image_path)
+        
+        # 方法1：使用_getexif()
+        exif = img._getexif()
+        if exif:
+            for tag_id, value in exif.items():
+                tag = TAGS.get(tag_id, tag_id)
+                # 确保值是可序列化的
+                if isinstance(value, bytes):
+                    value = value.decode('utf-8', errors='replace')
+                exif_data[tag] = str(value)
+            
+            # 专门保存相机信息和曝光参数
+            # 1. 相机制造商和型号
+            make = exif.get(271, '')  # Manufacturer
+            model = exif.get(272, '')  # Model
+            if make: exif_data['CameraMake'] = str(make)
+            if model: exif_data['CameraModel'] = str(model)
+              
+            # 2. 曝光参数
+            exposure = exif.get(33434, '')  # ExposureTime
+            aperture = exif.get(33437, '')  # FNumber
+            iso = exif.get(34855, '')  # ISOSpeedRatings
+            focal = exif.get(37386, '')  # FocalLength
+              
+            if exposure: exif_data['ExposureTime'] = str(exposure)
+            if aperture: exif_data['Aperture'] = str(aperture)
+            if iso: exif_data['ISO'] = str(iso)
+            if focal: exif_data['FocalLength'] = str(focal)
+              
+            # 3. 拍摄时间
+            datetime = exif.get(36867, '')  # DateTimeOriginal
+            if datetime: exif_data['DateTimeOriginal'] = str(datetime)
+
+        # 如果方法1没有提取到数据，尝试使用info字典
+        if not exif_data:
+            try:
+                # 尝试直接从info中获取信息
+                if hasattr(img, 'info'):
+                    # 复制所有非图像数据的信息
+                    for key, value in img.info.items():
+                        if key != 'exif' and key != 'icc_profile':
+                            if isinstance(value, bytes):
+                                try:
+                                    value = value.decode('utf-8', errors='replace')
+                                except:
+                                    value = str(value)
+                            exif_data[key] = str(value)
+            except:
+                pass
+        
+        # 如果提取到了任何数据，标记为有EXIF
+        if exif_data:
+            exif_data['_has_exif'] = 'True'
+    except Exception as e:
+        print(f"无法提取EXIF数据: {e}")
+    
+    return exif_data
+
 def save_watermark_config(config):
     """保存水印配置到文件"""
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=4)
+            json.dump(config, f, ensure_ascii=False, indent=4, cls=PILJSONEncoder)
     except Exception as e:
         print(f"保存配置文件失败: {e}")
 
 
-def merge_images_grid(src_dir, rows, cols, spacing, max_size, progress_var):
+def merge_images_grid(src_dir, merge_count, spacing, max_size, progress_var):
+    """按横竖屏分类合并图片
+    src_dir: 源图片目录
+    merge_count: 每张合并图片包含的图片数量（2,3,4,6,9）
+    spacing: 图片间距
+    max_size: 最大尺寸限制
+    progress_var: 进度条变量
+    """
     if not src_dir or not os.path.exists(src_dir):
         messagebox.showerror("错误", "请选择有效的源图片文件夹")
+        return
+
+    # 验证合并数量是否在支持的选项中
+    if merge_count not in MERGE_OPTIONS:
+        messagebox.showerror("错误", f"不支持的合并数量: {merge_count}，请选择 2,3,4,6,9")
         return
 
     dst_dir = os.path.join(src_dir, "merged_output")
     os.makedirs(dst_dir, exist_ok=True)
     record_file = os.path.join(dst_dir, "record.json")
 
-    # 读取所有图片，不缩放单张，保持原图尺寸，按文件名排序
-    images, filenames = [], []
-    exif_metadata = []  # 首先定义EXIF元数据列表
-    
-    for fname in sorted(os.listdir(src_dir)):
-            if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                try:
-                    img_path = os.path.join(src_dir, fname)
-                    img = Image.open(img_path)
-                    images.append(img)
-                    filenames.append(fname)
-                      
-                    # 提取并保存EXIF元数据
-                    exif_data = {}
-                    try:
-                        # 方法1：使用_getexif()
-                        exif = img._getexif()
-                        if exif:
-                            for tag_id, value in exif.items():
-                                tag = TAGS.get(tag_id, tag_id)
-                                # 确保值是可序列化的
-                                if isinstance(value, bytes):
-                                    value = value.decode('utf-8', errors='replace')
-                                exif_data[tag] = str(value)
-                          
-                            # 专门保存相机信息和曝光参数
-                            # 1. 相机制造商和型号
-                            make = exif.get(271, '')  # Manufacturer
-                            model = exif.get(272, '')  # Model
-                            if make: exif_data['CameraMake'] = str(make)
-                            if model: exif_data['CameraModel'] = str(model)
-                             
-                            # 2. 曝光参数
-                            exposure = exif.get(33434, '')  # ExposureTime
-                            aperture = exif.get(33437, '')  # FNumber
-                            iso = exif.get(34855, '')  # ISOSpeedRatings
-                            focal = exif.get(37386, '')  # FocalLength
-                             
-                            if exposure: exif_data['ExposureTime'] = str(exposure)
-                            if aperture: exif_data['Aperture'] = str(aperture)
-                            if iso: exif_data['ISO'] = str(iso)
-                            if focal: exif_data['FocalLength'] = str(focal)
-                             
-                            # 3. 拍摄时间
-                            datetime = exif.get(36867, '')  # DateTimeOriginal
-                            if datetime: exif_data['DateTimeOriginal'] = str(datetime)
+    # 按横竖屏分类图片
+    portrait_images, landscape_images, portrait_exif, landscape_exif, portrait_filenames, landscape_filenames = \
+        categorize_images_by_orientation(src_dir)
 
-                        # 如果方法1没有提取到数据，尝试使用info字典
-                        if not exif_data:
-                            try:
-                                # 尝试直接从info中获取信息
-                                if hasattr(img, 'info'):
-                                    # 复制所有非图像数据的信息
-                                    for key, value in img.info.items():
-                                        if key != 'exif' and key != 'icc_profile':
-                                            if isinstance(value, bytes):
-                                                try:
-                                                    value = value.decode('utf-8', errors='replace')
-                                                except:
-                                                    value = str(value)
-                                            exif_data[key] = str(value)
-                            except:
-                                pass
-                      
-                        # 如果提取到了任何数据，标记为有EXIF
-                        if exif_data:
-                            exif_data['_has_exif'] = 'True'
-                    except Exception as e:
-                        print(f"无法提取{fname}的EXIF数据: {e}")
-                      
-                    # 将EXIF数据添加到元数据列表
-                    exif_metadata.append(exif_data)
-                except Exception as e:
-                    print(f"无法打开 {fname}: {e}")
-                    # 添加空的EXIF数据，确保索引一致
-                    exif_metadata.append({})
-
-    if not images:
+    if not portrait_images and not landscape_images:
         messagebox.showerror("错误", "没有找到图片文件")
         return
 
     record_data = []
+    total_batches = 0
+    processed_batches = 0
+    
+    # 处理竖屏图片
+    if portrait_images:
+        rows, cols = MERGE_OPTIONS[merge_count]["portrait"]
+        batch_size = rows * cols
+        total_portrait_batches = (len(portrait_images) + batch_size - 1) // batch_size
+        total_batches += total_portrait_batches
+        
+        processed_batches = merge_image_batches(
+            portrait_images, portrait_filenames, portrait_exif, 
+            rows, cols, spacing, max_size, progress_var,
+            dst_dir, record_data, "portrait", processed_batches
+        )
+    
+    # 处理横屏图片
+    if landscape_images:
+        rows, cols = MERGE_OPTIONS[merge_count]["landscape"]
+        batch_size = rows * cols
+        total_landscape_batches = (len(landscape_images) + batch_size - 1) // batch_size
+        total_batches += total_landscape_batches
+        
+        merge_image_batches(
+            landscape_images, landscape_filenames, landscape_exif, 
+            rows, cols, spacing, max_size, progress_var,
+            dst_dir, record_data, "landscape", processed_batches
+        )
+    
+    # 保存记录文件
+    with open(record_file, 'w', encoding='utf-8') as f:
+        json.dump(record_data, f, ensure_ascii=False, indent=4, cls=PILJSONEncoder)
+    
+    progress_var.set(100)
+    messagebox.showinfo("完成", f"拼接完成，输出目录: {dst_dir}")
+    
+
+def merge_image_batches(images, filenames, exif_metadata, rows, cols, spacing, max_size, 
+                        progress_var, dst_dir, record_data, orientation, start_index):
+    """批量合并一组图片
+    images: 图片列表
+    filenames: 文件名列表
+    exif_metadata: EXIF数据列表
+    rows, cols: 网格行列数
+    spacing: 图片间距
+    max_size: 最大尺寸限制
+    progress_var: 进度条变量
+    dst_dir: 输出目录
+    record_data: 记录数据列表
+    orientation: 方向标识（portrait或landscape）
+    start_index: 起始批次索引
+    """
     idx = 0
-    merge_index = 1
     batch_size = rows * cols
     total_batches = (len(images) + batch_size - 1) // batch_size
-
+    
     while idx < len(images):
         batch_imgs = images[idx:idx + batch_size]
         batch_names = filenames[idx:idx + batch_size]
@@ -181,7 +327,9 @@ def merge_images_grid(src_dir, rows, cols, spacing, max_size, progress_var):
                 pos["w"] = int(pos["w"] * scale)
                 pos["h"] = int(pos["h"] * scale)
 
-        merged_name = f"merged_{merge_index:04d}.png"
+        # 生成带方向标识的文件名
+        batch_index = start_index + (idx // batch_size) + 1
+        merged_name = f"merged_{orientation}_{batch_index:04d}.png"
         merged_path = os.path.join(dst_dir, merged_name)
         merged.save(merged_path)
 
@@ -191,19 +339,18 @@ def merge_images_grid(src_dir, rows, cols, spacing, max_size, progress_var):
             "spacing": spacing,
             "rows": rows,
             "cols": cols,
-            "scale": scale
+            "scale": scale,
+            "orientation": orientation
         })
 
         idx += batch_size
-        merge_index += 1
-        progress_var.set(int((merge_index - 1) / total_batches * 100))
+        current_progress = (batch_index) / (total_batches + start_index) * 100
+        progress_var.set(int(current_progress))
         root.update_idletasks()
+        
+    return start_index + total_batches
 
-    with open(record_file, 'w', encoding='utf-8') as f:
-        json.dump(record_data, f, ensure_ascii=False, indent=4)
 
-    progress_var.set(100)
-    messagebox.showinfo("完成", f"拼接完成，输出目录: {dst_dir}")
 
 
 def add_watermark(image, watermark_path, watermark_size, position, opacity):
@@ -350,14 +497,13 @@ def choose_watermark(entry_widget):
 
 def start_merge():
     try:
-        rows = int(entry_rows.get().strip())
-        cols = int(entry_cols.get().strip())
+        merge_count = int(merge_count_var.get())
         spacing = int(entry_spacing.get().strip())
         max_size = int(entry_maxsize.get().strip())
     except ValueError:
         messagebox.showerror("错误", "请输入有效的数字")
         return
-    merge_images_grid(entry_merge_src.get().strip(), rows, cols, spacing, max_size, progress_var)
+    merge_images_grid(entry_merge_src.get().strip(), merge_count, spacing, max_size, progress_var)
 
 
 def start_split():
@@ -484,27 +630,32 @@ entry_merge_src = tk.Entry(frame_merge, width=50)
 entry_merge_src.grid(row=0, column=1)
 tk.Button(frame_merge, text="选择", command=lambda: choose_folder(entry_merge_src)).grid(row=0, column=2)
 
-tk.Label(frame_merge, text="行数:").grid(row=1, column=0, sticky="w")
-entry_rows = tk.Entry(frame_merge, width=5)
-entry_rows.grid(row=1, column=1, sticky="w")
-entry_rows.insert(0, "3")
+# 合并数量选择
+merge_count_var = tk.IntVar(value=6)  # 默认选择6张
+merge_count_frame = tk.Frame(frame_merge)
+merge_count_frame.grid(row=1, column=0, columnspan=3, pady=5)
+tk.Label(merge_count_frame, text="每张合并图片包含的图片数量: ").pack(side=tk.LEFT)
 
-tk.Label(frame_merge, text="列数:").grid(row=1, column=1, sticky="e", padx=(100, 0))
-entry_cols = tk.Entry(frame_merge, width=5)
-entry_cols.grid(row=1, column=1, sticky="e", padx=(150, 0))
-entry_cols.insert(0, "3")
+# 创建合并数量选项按钮
+for count in sorted(MERGE_OPTIONS.keys()):
+    tk.Radiobutton(merge_count_frame, text=str(count), variable=merge_count_var, value=count).pack(side=tk.LEFT, padx=10)
 
-tk.Label(frame_merge, text="间距(px):").grid(row=2, column=0, sticky="w")
+# 添加布局说明
+layout_desc = tk.Label(frame_merge, text="注: 图片会自动按横竖屏分类，6张时竖屏2行3列，横屏3行2列", 
+                       fg="gray", font=("SimHei", 9))
+layout_desc.grid(row=2, column=0, columnspan=3, sticky="w", padx=5)
+
+tk.Label(frame_merge, text="间距(px):").grid(row=3, column=0, sticky="w")
 entry_spacing = tk.Entry(frame_merge, width=5)
-entry_spacing.grid(row=2, column=1, sticky="w")
+entry_spacing.grid(row=3, column=1, sticky="w")
 entry_spacing.insert(0, "0")
 
-tk.Label(frame_merge, text="最大合成图宽高限制(px):").grid(row=2, column=1, sticky="e", padx=(80, 0))
+tk.Label(frame_merge, text="最大合成图宽高限制(px):").grid(row=3, column=1, sticky="e", padx=(100, 0))
 entry_maxsize = tk.Entry(frame_merge, width=7)
-entry_maxsize.grid(row=2, column=1, sticky="e", padx=(200, 0))
-entry_maxsize.insert(0, "12000")
+entry_maxsize.grid(row=3, column=1, sticky="e", padx=(200, 0))
+entry_maxsize.insert(0, str(DEFAULT_MAX_SIZE))
 
-tk.Button(frame_merge, text="开始拼接", command=start_merge).grid(row=3, column=1, pady=5)
+tk.Button(frame_merge, text="开始拼接", command=start_merge).grid(row=4, column=1, pady=5)
 
 frame_split = tk.LabelFrame(root, text="功能2: 图片拆分")
 frame_split.pack(fill="x", padx=10, pady=5)
