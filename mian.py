@@ -20,6 +20,9 @@ MERGE_OPTIONS = {
 # 默认最大尺寸限制为12000像素
 DEFAULT_MAX_SIZE = 12000
 
+# 默认将横竖屏分开拼接
+DEFAULT_SPLIT_BY_ORIENTATION = True
+
 # 定义保存的常量
 FILE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp')
 
@@ -191,13 +194,14 @@ def save_watermark_config(config):
         print(f"保存配置文件失败: {e}")
 
 
-def merge_images_grid(src_dir, merge_count, spacing, max_size, progress_var):
+def merge_images_grid(src_dir, merge_count, spacing, max_size, progress_var, split_by_orientation=True):
     """按横竖屏分类合并图片
     src_dir: 源图片目录
     merge_count: 每张合并图片包含的图片数量（2,3,4,6,9）
     spacing: 图片间距
     max_size: 最大尺寸限制
     progress_var: 进度条变量
+    split_by_orientation: 是否将横竖屏分开拼接
     """
     if not src_dir or not os.path.exists(src_dir):
         messagebox.showerror("错误", "请选择有效的源图片文件夹")
@@ -224,31 +228,73 @@ def merge_images_grid(src_dir, merge_count, spacing, max_size, progress_var):
     total_batches = 0
     processed_batches = 0
     
-    # 处理竖屏图片
-    if portrait_images:
-        rows, cols = MERGE_OPTIONS[merge_count]["portrait"]
-        batch_size = rows * cols
-        total_portrait_batches = (len(portrait_images) + batch_size - 1) // batch_size
-        total_batches += total_portrait_batches
+    if split_by_orientation:
+        # 处理竖屏图片
+        if portrait_images:
+            rows, cols = MERGE_OPTIONS[merge_count]["portrait"]
+            batch_size = rows * cols
+            total_portrait_batches = (len(portrait_images) + batch_size - 1) // batch_size
+            total_batches += total_portrait_batches
+            
+            processed_batches = merge_image_batches_optimized(
+                portrait_images, portrait_filenames, portrait_exif, 
+                rows, cols, spacing, max_size, progress_var,
+                dst_dir, record_data, "portrait", processed_batches
+            )
         
-        processed_batches = merge_image_batches(
-            portrait_images, portrait_filenames, portrait_exif, 
-            rows, cols, spacing, max_size, progress_var,
-            dst_dir, record_data, "portrait", processed_batches
-        )
-    
-    # 处理横屏图片
-    if landscape_images:
-        rows, cols = MERGE_OPTIONS[merge_count]["landscape"]
-        batch_size = rows * cols
-        total_landscape_batches = (len(landscape_images) + batch_size - 1) // batch_size
-        total_batches += total_landscape_batches
+        # 处理横屏图片
+        if landscape_images:
+            rows, cols = MERGE_OPTIONS[merge_count]["landscape"]
+            batch_size = rows * cols
+            total_landscape_batches = (len(landscape_images) + batch_size - 1) // batch_size
+            total_batches += total_landscape_batches
+            
+            merge_image_batches_optimized(
+                landscape_images, landscape_filenames, landscape_exif, 
+                rows, cols, spacing, max_size, progress_var,
+                dst_dir, record_data, "landscape", processed_batches
+            )
+    else:
+        # 不按横竖屏分开拼接，混合处理所有图片
+        # 但仍然根据每张图片的方向选择合适的布局，尽量减少尺寸调整
+        all_images = portrait_images + landscape_images
+        all_filenames = portrait_filenames + landscape_filenames
+        all_exif = portrait_exif + landscape_exif
         
-        merge_image_batches(
-            landscape_images, landscape_filenames, landscape_exif, 
-            rows, cols, spacing, max_size, progress_var,
-            dst_dir, record_data, "landscape", processed_batches
-        )
+        # 为混合模式实现尽量最小化尺寸调整的逻辑
+        batch_size = merge_count
+        total_batches = (len(all_images) + batch_size - 1) // batch_size
+        
+        # 处理每个批次
+        processed_batches = 0
+        for i in range(0, len(all_images), batch_size):
+            batch_imgs = all_images[i:i + batch_size]
+            batch_names = all_filenames[i:i + batch_size]
+            batch_exif = all_exif[i:i + batch_size]
+            
+            # 分析当前批次中图片的方向分布
+            portrait_count = sum(1 for img in batch_imgs if is_portrait(img))
+            landscape_count = len(batch_imgs) - portrait_count
+            
+            # 选择合适的布局（基于方向分布）
+            # 如果竖屏图片占大多数，使用竖屏布局；否则使用横屏布局
+            if portrait_count > landscape_count:
+                rows, cols = MERGE_OPTIONS[merge_count]["portrait"]
+                layout_type = "mixed_portrait_preferred"
+            else:
+                rows, cols = MERGE_OPTIONS[merge_count]["landscape"]
+                layout_type = "mixed_landscape_preferred"
+            
+            # 调用批处理函数
+            merge_image_batches_optimized(
+                batch_imgs, batch_names, batch_exif, 
+                rows, cols, spacing, max_size, progress_var,
+                dst_dir, record_data, layout_type, processed_batches
+            )
+            
+            processed_batches += 1
+            progress_var.set(int(processed_batches / total_batches * 100))
+            root.update_idletasks()
     
     # 保存记录文件
     with open(record_file, 'w', encoding='utf-8') as f:
@@ -258,7 +304,7 @@ def merge_images_grid(src_dir, merge_count, spacing, max_size, progress_var):
     messagebox.showinfo("完成", f"拼接完成，输出目录: {dst_dir}")
     
 
-def merge_image_batches(images, filenames, exif_metadata, rows, cols, spacing, max_size, 
+def merge_image_batches_optimized(images, filenames, exif_metadata, rows, cols, spacing, max_size, 
                         progress_var, dst_dir, record_data, orientation, start_index):
     """批量合并一组图片
     images: 图片列表
@@ -500,10 +546,11 @@ def start_merge():
         merge_count = int(merge_count_var.get())
         spacing = int(entry_spacing.get().strip())
         max_size = int(entry_maxsize.get().strip())
+        split_by_orientation = split_by_orientation_var.get()
     except ValueError:
         messagebox.showerror("错误", "请输入有效的数字")
         return
-    merge_images_grid(entry_merge_src.get().strip(), merge_count, spacing, max_size, progress_var)
+    merge_images_grid(entry_merge_src.get().strip(), merge_count, spacing, max_size, progress_var, split_by_orientation)
 
 
 def start_split():
@@ -640,10 +687,18 @@ tk.Label(merge_count_frame, text="每张合并图片包含的图片数量: ").pa
 for count in sorted(MERGE_OPTIONS.keys()):
     tk.Radiobutton(merge_count_frame, text=str(count), variable=merge_count_var, value=count).pack(side=tk.LEFT, padx=10)
 
+# 横竖屏分开拼接选项
+frame_orientation = tk.Frame(frame_merge)
+frame_orientation.grid(row=2, column=0, columnspan=3, pady=5)
+tk.Label(frame_orientation, text="是否将横竖屏分开拼接: ").pack(side=tk.LEFT)
+split_by_orientation_var = tk.BooleanVar(value=DEFAULT_SPLIT_BY_ORIENTATION)
+tk.Radiobutton(frame_orientation, text="是", variable=split_by_orientation_var, value=True).pack(side=tk.LEFT, padx=10)
+tk.Radiobutton(frame_orientation, text="否", variable=split_by_orientation_var, value=False).pack(side=tk.LEFT, padx=10)
+
 # 添加布局说明
-layout_desc = tk.Label(frame_merge, text="注: 图片会自动按横竖屏分类，6张时竖屏2行3列，横屏3行2列", 
+layout_desc = tk.Label(frame_merge, text="注: 默认自动按横竖屏分类，6张时竖屏2行3列，横屏3行2列", 
                        fg="gray", font=("SimHei", 9))
-layout_desc.grid(row=2, column=0, columnspan=3, sticky="w", padx=5)
+layout_desc.grid(row=3, column=0, columnspan=3, sticky="w", padx=5)
 
 tk.Label(frame_merge, text="间距(px):").grid(row=3, column=0, sticky="w")
 entry_spacing = tk.Entry(frame_merge, width=5)
