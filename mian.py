@@ -8,6 +8,8 @@ import piexif
 import os
 from fractions import Fraction
 
+from PIL import ImageOps  # 在文件顶部导入一次
+
 # 定义常用的合并数量和对应的行列配置
 MERGE_OPTIONS = {
     2: {"portrait": (2, 1), "landscape": (1, 2)},  # 竖屏2张: 2行1列, 横屏2张: 1行2列
@@ -102,7 +104,8 @@ def categorize_images_by_orientation(src_dir):
             try:
                 img_path = os.path.join(src_dir, fname)
                 img = Image.open(img_path)
-                
+                # 修正图片的EXIF旋转方向
+                img = ImageOps.exif_transpose(img)
                 # 提取并保存EXIF元数据
                 exif_data = extract_exif_data(img_path)
                 
